@@ -1,0 +1,9 @@
+node_modules
+aws1.log
+az1.log
+tc1.log
+check-proxy.sh
+ec2-test.js
+test.js
+config.conf
+tc2.log
