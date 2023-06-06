@@ -8,7 +8,6 @@ const { SocksProxyAgent } = require("socks-proxy-agent");
 const tencentcloud = require("tencentcloud-sdk-nodejs");
 const { DefaultAzureCredential } = require("@azure/identity");
 const { NetworkManagementClient } = require("@azure/arm-network");
-
 const {
   EC2Client,
   AllocateAddressCommand,
@@ -444,18 +443,24 @@ async function parseConfig() {
       const email = config.get(confList[i], "email");
       const token = config.get(confList[i], "token");
       const domain = config.get(confList[i], "domain");
+      const configName = confList[i];
       cloudflareConfig.email = email;
       cloudflareConfig.token = token;
       cloudflareConfig.domain = domain;
+      cloudflareConfig.configName = configName;
     } else if (configType == "api") {
       const prefix = config.get(confList[i], "prefix");
       const port = config.get(confList[i], "port");
-      const local_ip = config.get(confList[i], "local_ip");
+      const hostLocalIp = config.get(confList[i], "hostLocalIp");
+      const hostPublicIp = config.get(confList[i], "hostPublicIp");
       const key = config.get(confList[i], "key");
+      const apiHostName = config.get(confList[i], "apiHostName");
       apiConfig.prefix = prefix;
       apiConfig.port = port;
-      apiConfig.local_ip = local_ip;
+      apiConfig.hostLocalIp = hostLocalIp;
+      apiConfig.hostPublicIp = hostPublicIp;
       apiConfig.key = key;
+      apiConfig.apiHostName = apiHostName;
     } else if (configType == "azure") {
       const socks5Port = config.get(confList[i], "socks5Port");
       const httpPort = config.get(confList[i], "httpPort");
@@ -511,6 +516,164 @@ async function parseConfig() {
   };
 }
 
+async function checkCloudflare(serverConfig) {
+  const cloudflareEmail = serverConfig.email;
+  const cloudflareKey = serverConfig.token;
+  const cloudflareDomain = serverConfig.domain;
+  const configName = serverConfig.configName;
+  let result = {};
+  result.configName = configName;
+  try {
+    const cf = require("cloudflare")({
+      email: cloudflareEmail,
+      key: cloudflareKey,
+    });
+    const zoneId = await cf.zones.browse().then((data) => {
+      const zone = data.result.find((zone) => zone.name == cloudflareDomain);
+      return zone.id;
+    });
+    if (!zoneId) {
+      return false;
+    }
+    result.zoneId = zoneId;
+    result.success = true;
+  } catch (err) {
+    result.success = false;
+  }
+  return result;
+}
+
+async function checkTencent(serverConfig) {
+  const CvmClient = tencentcloud.cvm.v20170312.Client;
+  const secretId = serverConfig.secretId;
+  const secretKey = serverConfig.secretKey;
+  const region = serverConfig.region;
+  const instanceId = serverConfig.instanceId;
+  const configName = serverConfig.configName;
+  const clientConfig = {
+    credential: {
+      secretId: secretId,
+      secretKey: secretKey,
+    },
+    region: region,
+    profile: {
+      httpProfile: {
+        endpoint: "cvm.tencentcloudapi.com",
+      },
+    },
+  };
+  const client = new CvmClient(clientConfig);
+  const params = {
+    InstanceIds: [instanceId],
+  };
+  let result = {};
+  result.configName = serverConfig.configName;
+  try {
+    let instanceDescribed = await client.DescribeInstances(params);
+    let oldIp = "";
+    if (
+      instanceDescribed.InstanceSet[0].PublicIpAddresses == null ||
+      instanceDescribed.InstanceSet[0].PublicIpAddresses.length === 0
+    ) {
+      oldIp = "";
+    } else {
+      oldIp = instanceDescribed.InstanceSet[0].PublicIpAddresses[0];
+    }
+    result.success = true;
+    result.ip = oldIp;
+  } catch (err) {
+    result.success = false;
+  }
+  return result;
+}
+async function checkAws(serverConfig) {
+  const accessKey = serverConfig.accessKey;
+  const secretKey = serverConfig.secretKey;
+  const instanceId = serverConfig.instanceId;
+  const region = serverConfig.region;
+  const configName = serverConfig.configName;
+  const ec2 = new EC2Client({
+    region: region,
+    credentials: {
+      accessKeyId: accessKey,
+      secretAccessKey: secretKey,
+    },
+  });
+  let result = {};
+  result.configName = configName;
+  try {
+    async function getInstanceIp() {
+      try {
+        const command = new DescribeInstancesCommand({
+          InstanceIds: [instanceId],
+        });
+        const response = await ec2.send(command);
+        return response.Reservations[0].Instances[0].PublicIpAddress;
+      } catch (err) {
+        console.error(err);
+      }
+    }
+    const oldIp = await getInstanceIp();
+    result.success = true;
+    result.ip = oldIp;
+  } catch (err) {
+    result.success = false;
+  }
+  return result;
+}
+async function checkAzure(serverConfig) {
+  process.env.AZURE_CLIENT_ID = serverConfig.clientId;
+  process.env.AZURE_CLIENT_SECRET = serverConfig.clientSecret;
+  process.env.AZURE_SUBSCRIPTION_ID = serverConfig.subscriptionId;
+  process.env.AZURE_TENANT_ID = serverConfig.tenantId;
+  const AZURE_CLIENT_ID = process.env.AZURE_CLIENT_ID;
+  const AZURE_CLIENT_SECRET = process.env.AZURE_CLIENT_SECRET;
+  const AZURE_SUBSCRIPTION_ID = process.env.AZURE_SUBSCRIPTION_ID;
+  const AZURE_TENANT_ID = process.env.AZURE_TENANT_ID;
+  const resourceGroupName = serverConfig.resourceGroupName;
+  const publicIpName = serverConfig.publicIpName;
+  const nicName = serverConfig.nicName;
+
+  const credential = new DefaultAzureCredential({
+    clientId: AZURE_CLIENT_ID,
+    clientSecret: AZURE_CLIENT_SECRET,
+    tenantId: AZURE_TENANT_ID,
+  });
+  let result = {};
+  result.configName = serverConfig.configName;
+  try {
+    const networkClient = new NetworkManagementClient(
+      credential,
+      AZURE_SUBSCRIPTION_ID
+    );
+    async function getIpDetail() {
+      const ip = await networkClient.publicIPAddresses.get(
+        resourceGroupName,
+        publicIpName
+      );
+      return ip;
+    }
+    async function getNic() {
+      const nic = await networkClient.networkInterfaces.get(
+        resourceGroupName,
+        nicName
+      );
+      return nic;
+    }
+    const [nic, ip] = await Promise.all([getNic(), getIpDetail()]);
+    if (nic && ip) {
+      result.success = true;
+      if (ip.ipAddress) {
+        result.ip = ip.ipAddress;
+      }
+    }
+  } catch (error) {
+    result.success = false;
+    result.error = error.message;
+  }
+  return result;
+}
+
 app.get(`/${prefix}/describe`, async (req, res) => {
   try {
     const { configs } = await parseConfig();
@@ -553,182 +716,61 @@ app.get(`/${prefix}/describe`, async (req, res) => {
   }
 });
 
-app.get(`/${prefix}/reset2/:configName`, async (req, res) => {
-  try {
-    const { configs } = await parseConfig();
-    const apiConfig = configs.api;
-    const cloudflareConfig = configs.cloudflare;
-    const domain = cloudflareConfig.domain;
-    const email = cloudflareConfig.email;
-    const token = cloudflareConfig.token;
-    const local_ip = apiConfig.local_ip;
-    const configName = req.params.configName;
-    const host = `${configName}.${domain}`;
-    const cf = require("cloudflare")({
-      email: email,
-      key: token,
-    });
-    const configType = config.get(configName, "type");
-    if (!configType) {
-      return res
-        .status(400)
-        .json({ success: false, error: "config not found" });
-    }
-    //stop service sslocal_$configName
-    exec(`systemctl stop sslocal_${configName}`, (err, stdout, stderr) => {
-      if (err) {
-        console.error(`Error stopping service: ${err}`);
-        return;
-      }
-      console.log(stdout);
-      console.log(stderr);
-    });
-
-    let result;
-    let serverConfig;
-    if (configType == "tencent") {
-      serverConfig = configs.tencent.find(
-        (config) => config.configName == configName
-      );
-      result = await newIpTencent(serverConfig);
-    } else if (configType == "azure") {
-      //remove configName from runningprocess.txt
-      runningProcess = fs.readFileSync("runningprocess.txt", "utf8");
-      runningProcessArray = runningProcess.split("\n");
-      runningProcessIndex = runningProcessArray.findIndex(
-        (line) => line == configName
-      );
-      runningProcessArray.splice(runningProcessIndex, 1);
-      const newRunningProcess = runningProcessArray.join("\n");
-      serverConfig = configs.azure.find(
-        (config) => config.configName == configName
-      );
-      result = await newIpAzure(serverConfig);
-    } else if (configType == "aws") {
-      serverConfig = configs.aws.find(
-        (config) => config.configName == configName
-      );
-      result = await newIpAws(serverConfig);
-    }
-    const socks5Port = serverConfig.socks5Port;
-    const httpPort = serverConfig.httpPort;
-    const publicIp = result.newIp;
-    //check if host exist on /etc/hosts, if yes delete the line cotaint host
-    const hosts = fs.readFileSync("/etc/hosts", "utf8");
-    const hostsArray = hosts.split("\n");
-    const hostIndex = hostsArray.findIndex((line) => line.includes(host));
-    if (hostIndex != -1) {
-      hostsArray.splice(hostIndex, 1);
-      const newHosts = hostsArray.join("\n");
-      fs.writeFileSync("/etc/hosts", newHosts);
-    }
-    //add host to /etc/hosts
-    fs.appendFileSync("/etc/hosts", `${publicIp} ${host}\n`);
-    //update cloudflare dns record
-    console.log(
-      `profile: ${configName}, old ip: ${result.oldIp}, new ip: ${result.newIp}`
-    );
-    const zoneId = await cf.zones.browse().then((data) => {
-      const zone = data.result.find((zone) => zone.name == domain);
-      return zone.id;
-    });
-    //check if dns record for host exist, if not create one, if yes update it
-    const dnsRecord = await cf.dnsRecords.browse(zoneId).then((data) => {
-      const record = data.result.find((record) => record.name == host);
-      return record;
-    });
-    if (dnsRecord == undefined) {
-      await cf.dnsRecords.add(zoneId, {
-        type: "A",
-        name: host,
-        content: publicIp,
-        ttl: 1,
-        proxied: false,
-      });
-    } else {
-      await cf.dnsRecords.edit(zoneId, dnsRecord.id, {
-        type: "A",
-        name: host,
-        content: publicIp,
-        ttl: 1,
-        proxied: false,
-      });
-    }
-
-    const configPath = `/etc/shadowsocks/config_${configName}.json`;
-    const configTemplate = fs.readFileSync("configtemplate.json", "utf8");
-    const configTemplateJson = JSON.parse(configTemplate);
-    configTemplateJson.server = host;
-    configTemplateJson.server_port = 8388;
-    configTemplateJson.password = "Pass";
-    configTemplateJson.method = "aes-128-gcm";
-    configTemplateJson.mode = "tcp_and_udp";
-    configTemplateJson.local_address = local_ip;
-    configTemplateJson.local_port = parseInt(socks5Port);
-    configTemplateJson.locals[0].local_address = local_ip;
-    configTemplateJson.locals[0].local_port = parseInt(httpPort);
-    fs.writeFileSync(configPath, JSON.stringify(configTemplateJson));
-
-    const servicePath = `/etc/systemd/system/sslocal_${configName}.service`;
-    const serviceTemplate = fs.readFileSync("service_template.service", "utf8");
-
-    const serviceTemplateArray = serviceTemplate.split("\n");
-    const serviceTemplateIndex = serviceTemplateArray.findIndex((line) =>
-      line.includes("ExecStart")
-    );
-    serviceTemplateArray[
-      serviceTemplateIndex
-    ] = `ExecStart=/usr/local/bin/sslocal -c /etc/shadowsocks/config_${configName}.json`;
-    const newServiceTemplate = serviceTemplateArray.join("\n");
-    fs.writeFileSync(servicePath, newServiceTemplate);
-    //enable and start sslocal_$configName.service
-    await exec(`systemctl daemon-reload`);
-    await exec(`systemctl start sslocal_${configName}.service`);
-    let retry = 0;
-    let maxRetry = 10;
-    while (true) {
-      try {
-        //check socks5://localhost:socks5Port to fake.chiacloud.farm/ip using axios, if response.data == publicIp, break
-        const socks5Url = `socks5://localhost:${socks5Port}`;
-        const agent = new SocksProxyAgent(socks5Url);
-
-        const response = await axios.request({
-          url: "http://fake.chiacloud.farm/ip",
-          method: "GET",
-          httpsAgent: agent,
-          httpAgent: agent,
-          timeout: 1000,
-        });
-        if (response.data == publicIp) {
-          break;
-        }
-        if (retry >= maxRetry) {
-          throw new Error("retry proxy connection exceed maxRetry");
-        }
-      } catch (err) {
-        await sleep(500);
-        retry++;
-        continue;
-      }
-    }
-    return res.status(200).json({ success: true, result });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, error: err.message });
+app.get(`/${prefix}/newip/`, async (req, res) => {
+  let configName = req.query.configName;
+  let port = req.query.port;
+  const { configs } = await parseConfig();
+  //only accept one of query
+  if (!configName && !port) {
+    return res
+      .status(400)
+      .json({ success: false, error: "bad request, no query found" });
   }
-});
+  if (configName && port) {
+    return res.status(400).json({
+      success: false,
+      error: "bad request, only accept one query (configName/port)",
+    });
+  }
 
-app.get(`/${prefix}/reset/:configName`, async (req, res) => {
-  const configName = req.params.configName;
-  console.log(`hit reset2 ${configName}`);
+  if (!configName) {
+    try {
+      const tencentConfig = configs.tencent.find(
+        (config) => config.socks5Port == port || config.httpPort == port
+      );
+      const azureConfig = configs.azure.find(
+        (config) => config.socks5Port == port || config.httpPort == port
+      );
+      const awsConfig = configs.aws.find(
+        (config) => config.socks5Port == port || config.httpPort == port
+      );
+
+      const foundConfig = tencentConfig || azureConfig || awsConfig;
+
+      if (!foundConfig) {
+        return res.status(400).json({
+          success: false,
+          error: `bad request, no config found with port ${port}`,
+        });
+      }
+
+      configName = foundConfig.configName;
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  }
+  console.log(`hit newip ${configName}`);
+  let result = {};
   try {
-    const { configs } = await parseConfig();
     const apiConfig = configs.api;
+    const apiHostName = apiConfig.apiHostName;
     const cloudflareConfig = configs.cloudflare;
     const domain = cloudflareConfig.domain;
     const email = cloudflareConfig.email;
     const token = cloudflareConfig.token;
-    const local_ip = apiConfig.local_ip;
+    const hostLocalIp = apiConfig.hostLocalIp;
+    const hostPublicIp = apiConfig.hostPublicIp;
     const host = `${configName}.${domain}`;
     const configType = config.get(configName, "type");
     if (!configType) {
@@ -766,8 +808,6 @@ app.get(`/${prefix}/reset/:configName`, async (req, res) => {
         return;
       }
     });
-
-    let result;
     let serverConfig;
     if (configType == "tencent") {
       serverConfig = configs.tencent.find(
@@ -833,6 +873,29 @@ app.get(`/${prefix}/reset/:configName`, async (req, res) => {
         proxied: false,
       });
     }
+    const apiHostNameRecord = await cf.dnsRecords
+      .browse(zoneId)
+      .then((data) => {
+        const record = data.result.find((record) => record.name == apiHostName);
+        return record;
+      });
+    if (apiHostNameRecord == undefined) {
+      await cf.dnsRecords.add(zoneId, {
+        type: "A",
+        name: apiHostName,
+        content: hostPublicIp,
+        ttl: 1,
+        proxied: false,
+      });
+    } else if (apiHostNameRecord.content != hostPublicIp) {
+      await cf.dnsRecords.edit(zoneId, apiHostNameRecord.id, {
+        type: "A",
+        name: apiHostName,
+        content: hostPublicIp,
+        ttl: 1,
+        proxied: false,
+      });
+    }
 
     const configPath = `/etc/shadowsocks/config_${configName}.json`;
     const configTemplate = fs.readFileSync("configtemplate.json", "utf8");
@@ -842,9 +905,9 @@ app.get(`/${prefix}/reset/:configName`, async (req, res) => {
     configTemplateJson.password = "Pass";
     configTemplateJson.method = "aes-128-gcm";
     configTemplateJson.mode = "tcp_and_udp";
-    configTemplateJson.local_address = local_ip;
+    configTemplateJson.local_address = hostLocalIp;
     configTemplateJson.local_port = parseInt(socks5Port);
-    configTemplateJson.locals[0].local_address = local_ip;
+    configTemplateJson.locals[0].local_address = hostLocalIp;
     configTemplateJson.locals[0].local_port = parseInt(httpPort);
     fs.writeFileSync(configPath, JSON.stringify(configTemplateJson));
 
@@ -899,8 +962,20 @@ app.get(`/${prefix}/reset/:configName`, async (req, res) => {
     runningProcessArray.splice(runningProcessIndex, 1);
     const newRunningProcess = runningProcessArray.join("\n");
     fs.writeFileSync("runningprocess.txt", newRunningProcess);
-
-    return res.status(200).json({ success: true, result });
+    result.proxy = {
+      socks5: `${apiHostName}:${socks5Port}`,
+      http: `${apiHostName}:${httpPort}`,
+    };
+    result.configName = configName;
+    return res.status(200).json({
+      success: true,
+      result: {
+        configName: configName,
+        oldIp: result.oldIp,
+        newIp: result.newIp,
+        proxy: result.proxy,
+      },
+    });
   } catch (err) {
     console.error(err);
     //remove configName from runningprocess.txt
@@ -912,6 +987,45 @@ app.get(`/${prefix}/reset/:configName`, async (req, res) => {
     runningProcessArray.splice(runningProcessIndex, 1);
     const newRunningProcess = runningProcessArray.join("\n");
     fs.writeFileSync("runningprocess.txt", newRunningProcess);
+    return res
+      .status(500)
+      .json({ success: false, configName: configName, error: err.message });
+  }
+});
+
+app.get(`/${prefix}/checkConfig`, async (req, res) => {
+  console.log("hit checkConfig");
+  const { configs } = await parseConfig();
+  const tencentConfigList = configs.tencent;
+  const cloudflareConfig = configs.cloudflare;
+  const awsConfigList = configs.aws;
+  const azureConfigList = configs.azure;
+  let cloudflareCheckResult = {};
+  let tencentCheckResult = [];
+  let awsCheckResult = [];
+  let azureCheckResult = [];
+
+  try {
+    cloudflareCheckResult = await checkCloudflare(cloudflareConfig);
+    tencentCheckResult = await Promise.all(
+      tencentConfigList.map((config) => checkTencent(config))
+    );
+    awsCheckResult = await Promise.all(
+      awsConfigList.map((config) => checkAws(config))
+    );
+    azureCheckResult = await Promise.all(
+      azureConfigList.map((config) => checkAzure(config))
+    );
+  } catch (err) {
     return res.status(500).json({ success: false, error: err.message });
   }
+  return res.status(200).json({
+    success: true,
+    result: {
+      cloudflare: cloudflareCheckResult,
+      tencent: tencentCheckResult,
+      aws: awsCheckResult,
+      azure: azureCheckResult,
+    },
+  });
 });
