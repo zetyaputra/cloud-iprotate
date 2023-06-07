@@ -4,6 +4,7 @@ const bodyParser = require("body-parser");
 const fs = require("fs");
 const morgan = require("morgan");
 const axios = require("axios");
+const { performance } = require("perf_hooks");
 const { SocksProxyAgent } = require("socks-proxy-agent");
 const tencentcloud = require("tencentcloud-sdk-nodejs");
 const { DefaultAzureCredential } = require("@azure/identity");
@@ -313,22 +314,24 @@ async function newIpAzure(serverConfig) {
     }
   }
   retries = 0;
-  max = 30;
+  max = 50;
+  let newIp = ip.ipAddress;
   while (true) {
-    if (!ip.ipAddress || ip.ipAddress === oldIp) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+    if (!newIp || newIp === oldIp) {
+      await sleep(1000);
       ip = await getIpDetail();
+      newIp = ip.ipAddress;
       retries++;
       if (retries < max) {
         continue;
       } else {
-        break;
+        throw new Error("Failed to get new I, max retries reached");
       }
     } else {
       break;
     }
   }
-  const newIp = ip.ipAddress;
+
   if (!newIp) {
     throw new Error("Failed to get new IP");
   }
@@ -674,49 +677,8 @@ async function checkAzure(serverConfig) {
   return result;
 }
 
-app.get(`/${prefix}/describe`, async (req, res) => {
-  try {
-    const { configs } = await parseConfig();
-    const tencentConfigList = configs.tencent;
-    let instanceDetails = [];
-    await Promise.all(
-      tencentConfigList.map(async (config) => {
-        const CvmClient = tencentcloud.cvm.v20170312.Client;
-        const clientConfig = {
-          credential: {
-            secretId: config.secretId,
-            secretKey: config.secretKey,
-          },
-          region: config.region,
-          profile: {
-            httpProfile: {
-              endpoint: "cvm.tencentcloudapi.com",
-            },
-          },
-        };
-        const client = new CvmClient(clientConfig);
-        const params = {
-          InstanceIds: [`${config.instanceId}`],
-        };
-        const instanceData = await client.DescribeInstances(params).then(
-          (data) => {
-            return data.InstanceSet[0];
-          },
-          (err) => {
-            console.error("error", err);
-          }
-        );
-        instanceDetails.push(instanceData);
-      })
-    );
-    return res.status(200).json({ success: true, instanceDetails });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 app.get(`/${prefix}/newip/`, async (req, res) => {
+  const startTime = performance.now();
   let configName = req.query.configName;
   let port = req.query.port;
   const { configs } = await parseConfig();
@@ -909,7 +871,21 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
     configTemplateJson.local_port = parseInt(socks5Port);
     configTemplateJson.locals[0].local_address = hostLocalIp;
     configTemplateJson.locals[0].local_port = parseInt(httpPort);
-    fs.writeFileSync(configPath, JSON.stringify(configTemplateJson));
+    //check if directory /etc/shadowsocks/ exist, if not create one
+    if (!fs.existsSync("/etc/shadowsocks")) {
+      fs.mkdirSync("/etc/shadowsocks");
+    }
+    if (!fs.existsSync(configPath)) {
+      try {
+        fs.writeFileSync(configPath, "");
+        console.log(`Config file ${configPath} created successfully.`);
+      } catch (err) {
+        console.error(`Error creating config file: ${err}`);
+      }
+    } else {
+      fs.writeFileSync(configPath, JSON.stringify(configTemplateJson));
+      console.log(`Config file ${configPath} updated successfully.`);
+    }
 
     const servicePath = `/etc/systemd/system/sslocal_${configName}.service`;
     const serviceTemplate = fs.readFileSync("service_template.service", "utf8");
@@ -927,13 +903,13 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
     await exec(`systemctl daemon-reload`);
     await exec(`systemctl start sslocal_${configName}.service`);
     let retry = 0;
-    let maxRetry = 10;
-    while (true) {
+    let maxRetry = 20;
+    for (retry = 0; retry < maxRetry; retry++) {
       try {
         //check socks5://localhost:socks5Port to fake.chiacloud.farm/ip using axios, if response.data == publicIp, break
-        const socks5Url = `socks5://localhost:${socks5Port}`;
+        const socks5Url = `socks5://${hostPublicIp}:${socks5Port}`;
         const agent = new SocksProxyAgent(socks5Url);
-
+        console.log(`try to connect using ${socks5Url}`);
         const response = await axios.request({
           url: "http://fake.chiacloud.farm/ip",
           method: "GET",
@@ -944,14 +920,13 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
         if (response.data == publicIp) {
           break;
         }
-        if (retry >= maxRetry) {
-          throw new Error("retry proxy connection exceed maxRetry");
-        }
       } catch (err) {
-        await sleep(500);
-        retry++;
+        await sleep(1000);
         continue;
       }
+    }
+    if (retry >= maxRetry) {
+      throw new Error("retry proxy connection exceed maxRetry");
     }
     //remove configName from runningprocess.txt
     runningProcess = fs.readFileSync("runningprocess.txt", "utf8");
@@ -965,8 +940,11 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
     result.proxy = {
       socks5: `${apiHostName}:${socks5Port}`,
       http: `${apiHostName}:${httpPort}`,
+      shadowsocks: `${host}:8388`,
     };
     result.configName = configName;
+    const endTime = performance.now();
+    const executionTime = parseInt((endTime - startTime) / 1000); // convert to seconds
     return res.status(200).json({
       success: true,
       result: {
@@ -975,6 +953,7 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
         newIp: result.newIp,
         proxy: result.proxy,
       },
+      executionTime: `${executionTime} seconds`,
     });
   } catch (err) {
     console.error(err);
@@ -987,9 +966,14 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
     runningProcessArray.splice(runningProcessIndex, 1);
     const newRunningProcess = runningProcessArray.join("\n");
     fs.writeFileSync("runningprocess.txt", newRunningProcess);
-    return res
-      .status(500)
-      .json({ success: false, configName: configName, error: err.message });
+    const endTime = performance.now();
+    const executionTime = parseInt((endTime - startTime) / 1000); // convert to seconds
+    return res.status(500).json({
+      success: false,
+      configName: configName,
+      error: err.message,
+      executionTime: `${executionTime} seconds`,
+    });
   }
 });
 
