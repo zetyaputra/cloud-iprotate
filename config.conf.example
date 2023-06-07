@@ -3,9 +3,9 @@ type = api
 key = 123456
 prefix = nganu
 port = 3000
-local_ip = 127.0.0.1
-public_ip = 127.0.0.1
-host = router.domain.com
+hostLocalIp = 127.0.0.1
+hostPublicIp = 127.0.0.1
+apiHostName = router.domain.com
 
 [cloudflare]
 type = cloudflare
