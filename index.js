@@ -813,10 +813,13 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
       email: email,
       key: token,
     })
-    const zoneId = await cf.zones.browse().then((data) => {
-      const zone = data.result.find((zone) => zone.name == domain)
-      return zone.id || cloudflareConfig.zoneId
-    })
+    let zoneId = cloudflareConfig.zoneId
+    if (!zoneId) {
+      zoneId = await cf.zones.browse().then((data) => {
+        const zone = data.result.find((zone) => zone.name == domain)
+        return zone.id || cloudflareConfig.zoneId
+      })
+    }
     //check if dns record for host exist, if not create one, if yes update it
     const dnsRecord = await cf.dnsRecords.browse(zoneId).then((data) => {
       const record = data.result.find((record) => record.name == host)
