@@ -446,11 +446,13 @@ async function parseConfig() {
       const email = config.get(confList[i], 'email')
       const token = config.get(confList[i], 'token')
       const domain = config.get(confList[i], 'domain')
+      const zoneId = config.get(confList[i], 'zoneId') || ''
       const configName = confList[i]
       cloudflareConfig.email = email
       cloudflareConfig.token = token
       cloudflareConfig.domain = domain
       cloudflareConfig.configName = configName
+      cloudflareConfig.zoneId = zoneId
     } else if (configType == 'api') {
       const prefix = config.get(confList[i], 'prefix')
       const port = config.get(confList[i], 'port')
@@ -531,12 +533,15 @@ async function checkCloudflare(serverConfig) {
       email: cloudflareEmail,
       key: cloudflareKey,
     })
-    const zoneId = await cf.zones.browse().then((data) => {
-      const zone = data.result.find((zone) => zone.name == cloudflareDomain)
-      return zone.id
-    })
+    let zoneId = serverConfig.zoneId
     if (!zoneId) {
-      return false
+      zoneId = await cf.zones.browse().then((data) => {
+        const zone = data.result.find((zone) => zone.name == cloudflareDomain)
+        return zone.id
+      })
+      if (!zoneId) {
+        return false
+      }
     }
     result.zoneId = zoneId
     result.success = true
@@ -810,7 +815,7 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
     })
     const zoneId = await cf.zones.browse().then((data) => {
       const zone = data.result.find((zone) => zone.name == domain)
-      return zone.id
+      return zone.id || cloudflareConfig.zoneId
     })
     //check if dns record for host exist, if not create one, if yes update it
     const dnsRecord = await cf.dnsRecords.browse(zoneId).then((data) => {
