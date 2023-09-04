@@ -984,7 +984,7 @@ app.get(`/${prefix}/newip/`, async (req, res) => {
   }
 })
 
-app.get('/ip', async (req, res) => {
+app.get(`/${prefix}/ip`, async (req, res) => {
   try {
     const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress
     return res.status(200).send(ip)
