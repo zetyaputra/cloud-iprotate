@@ -7,8 +7,7 @@ wget https://github.com/ilyasbit/ss-easy-setup/raw/main/ss.tar.gz -O /tmp/ss.tar
 tar -xvf /tmp/ss.tar.gz -C /tmp/
 mv /tmp/ss/* /usr/local/bin/
 
-local_ip=$(ip route get 8.8.8.8 | sed -nr 's/.*src ([^\ ]+).*/\1/p')
-public_ip=$(curl -s fake.chiacloud.farm/ip)
+local_ip="0.0.0.0"
 
 mkdir /etc/shadowsocks
 cat >/etc/shadowsocks/config.json <<EOF
@@ -20,7 +19,7 @@ cat >/etc/shadowsocks/config.json <<EOF
     "local_address": "$local_ip",
     "local_port": 1081,
     "local_udp_address": "$local_ip",
-    "local_udp_port": 2081,
+    "local_udp_port": 1081,
     "timeout": 7200,
     "reuse_port": true,
     "method": "aes-128-gcm",
