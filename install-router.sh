@@ -14,8 +14,8 @@ else
     echo "nodejs version 18.x.x already installed"
 fi
 
-if [[ -d "/opt/cloud-iprotate1/" ]]; then
-    rm -rf /opt/cloud-iprotate1/
+if [[ -d "/opt/cloud-iprotate/" ]]; then
+    rm -rf /opt/cloud-iprotate/
 fi
 sudo curl https://raw.githubusercontent.com/ilyasbit/ss-easy-setup/main/install-only.sh | sudo bash -s
 mkdir -p /etc/shadowsocks/
